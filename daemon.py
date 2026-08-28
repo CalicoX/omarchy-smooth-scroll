@@ -222,29 +222,140 @@ def _spawn(argv):
         sys.stderr.write(f"smooth-scroll: spawn failed: {exc}\n")
 
 
-def dispatch_hypr(dispatcher, arg=""):
+def lua_str(value):
+    return json.dumps("" if value is None else str(value), ensure_ascii=False)
+
+
+def hyprctl_dispatch_expr(expression):
+    """Run a Lua dispatcher object via `hyprctl dispatch`, same as Super+K.
+
+    Omarchy 4's Hyprland wraps `hyprctl dispatch X` as `hl.dispatch(X)`, so
+    classic `dispatch exec foo` is a parse error. Pass `hl.dsp.*(...)` instead.
+    """
+    expression = str(expression or "").strip()
+    if not expression:
+        return False
+    try:
+        result = subprocess.run(
+            ["hyprctl", "dispatch", expression],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        sys.stderr.write(f"smooth-scroll: hyprctl dispatch failed: {exc}\n")
+        return False
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    if result.returncode == 0 and out in ("", "ok"):
+        return True
+    sys.stderr.write(f"smooth-scroll: hyprctl dispatch failed: {out or err or result.returncode}\n")
+    return False
+
+
+def dispatch_exec(command):
+    command = str(command or "")
+    if not command:
+        return False
+    if hyprctl_dispatch_expr(f"hl.dsp.exec_cmd({lua_str(command)})"):
+        return True
+    try:
+        result = subprocess.run(
+            ["hyprctl", "eval", f"hl.exec_cmd({lua_str(command)})"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=os.environ.copy(),
+        )
+        out = (result.stdout or "").strip()
+        if result.returncode == 0 and out in ("", "ok"):
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    _spawn(["/bin/sh", "-c", command])
+    return True
+
+
+def dispatch_sendshortcut(arg):
+    parts = str(arg or "").split(",")
+    mods = parts[0].strip() if parts else ""
+    key = parts[1].strip() if len(parts) > 1 else ""
+    window = parts[2].strip() if len(parts) > 2 else ""
+    if not key:
+        return False
+    if not window:
+        window = "activewindow"
+    down = (
+        "hl.dsp.send_key_state({ mods = "
+        + lua_str(mods)
+        + ", key = "
+        + lua_str(key)
+        + ', state = "down", window = '
+        + lua_str(window)
+        + " })"
+    )
+    up = (
+        "hl.dsp.send_key_state({ mods = "
+        + lua_str(mods)
+        + ", key = "
+        + lua_str(key)
+        + ', state = "up", window = '
+        + lua_str(window)
+        + " })"
+    )
+    if hyprctl_dispatch_expr(down):
+        time.sleep(0.05)
+        return hyprctl_dispatch_expr(up)
+    return hyprctl_dispatch_expr(
+        "hl.dsp.send_shortcut({ mods = "
+        + lua_str(mods)
+        + ", key = "
+        + lua_str(key)
+        + ", window = "
+        + lua_str(window)
+        + " })"
+    )
+
+
+def _dispatch_hypr_sync(dispatcher, arg=""):
     dispatcher = str(dispatcher or "")
     arg = str(arg or "")
     if dispatcher == "exec":
-        _spawn(["hyprctl", "dispatch", "exec", arg])
+        dispatch_exec(arg)
         return
     if dispatcher == "lua":
-        _spawn(["hyprctl", "dispatch", arg])
+        if arg:
+            hyprctl_dispatch_expr(arg)
         return
     if dispatcher == "sendshortcut":
-        _spawn(["hyprctl", "dispatch", "sendshortcut", arg])
+        dispatch_sendshortcut(arg)
         return
     if dispatcher == "":
         return
+    if arg.lstrip().startswith("hl.dsp.") or dispatcher.startswith("hl.dsp."):
+        hyprctl_dispatch_expr(arg or dispatcher)
+        return
     if arg:
-        _spawn(["hyprctl", "dispatch", dispatcher, arg])
-    else:
-        _spawn(["hyprctl", "dispatch", dispatcher])
+        dispatch_exec(arg)
 
 
-def run_binding(spec):
+def dispatch_hypr(dispatcher, arg=""):
+    threading.Thread(
+        target=_dispatch_hypr_sync,
+        args=(str(dispatcher or ""), str(arg or "")),
+        daemon=True,
+    ).start()
+
+
+def run_binding(spec, wait=False):
     if isinstance(spec, dict):
-        dispatch_hypr(spec.get("dispatcher") or "", spec.get("arg") or "")
+        dispatcher = spec.get("dispatcher") or ""
+        arg = spec.get("arg") or ""
+        if wait:
+            _dispatch_hypr_sync(dispatcher, arg)
+        else:
+            dispatch_hypr(dispatcher, arg)
         return
     argv = ACTIONS.get(str(spec))
     if argv:
@@ -724,6 +835,8 @@ def cmd_shortcuts():
                 continue
             display, dispatcher = parts[0], parts[1]
             arg = parts[2] if len(parts) > 2 else ""
+            if not dispatcher.strip():
+                continue
             if "→" in display:
                 keys, desc = display.split("→", 1)
             else:
@@ -746,6 +859,21 @@ def cmd_shortcuts():
                 }
             )
     print(json.dumps(rows))
+
+
+def cmd_dispatch(args):
+    if not args:
+        print("usage: daemon.py dispatch <exec|lua|sendshortcut> [arg...]", file=sys.stderr)
+        sys.exit(2)
+    _dispatch_hypr_sync(args[0], " ".join(args[1:]))
+
+
+def cmd_fire(code):
+    spec = (load_config().get("bindings") or {}).get(str(code))
+    if not spec:
+        print(f"no binding for {code}", file=sys.stderr)
+        sys.exit(1)
+    run_binding(spec, wait=True)
 
 
 def cmd_learn(seconds="15"):
@@ -896,8 +1024,15 @@ def main():
         cmd_caps()
     elif cmd == "probe":
         cmd_probe(argv[1] if len(argv) > 1 else 12)
+    elif cmd == "dispatch":
+        cmd_dispatch(argv[1:])
+    elif cmd == "fire":
+        if len(argv) < 2:
+            print("usage: daemon.py fire <code>", file=sys.stderr)
+            sys.exit(2)
+        cmd_fire(argv[1])
     elif cmd in ("-h", "--help"):
-        print("usage: daemon.py [get|set KEY VALUE|bind CODE ACTION|shortcuts|learn|list|caps|probe]")
+        print("usage: daemon.py [get|set KEY VALUE|bind CODE ACTION|shortcuts|dispatch KIND ARG|fire CODE|learn|list|caps|probe]")
     else:
         print(f"unknown command: {cmd}", file=sys.stderr)
         sys.exit(2)

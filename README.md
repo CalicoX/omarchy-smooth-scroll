@@ -106,6 +106,8 @@ While the daemon is running it forces Hyprland `input.natural_scroll` off so dir
 
 **Double invert.** Disable Hyprland's own invert in `~/.config/hypr/input.lua` (`natural_scroll = false`) and use the plugin toggle.
 
+**Mouse shortcut does nothing.** Omarchy 4 Hyprland is Lua: Super+K runs `hyprctl dispatch 'hl.dsp.exec_cmd("…")'`, not `hyprctl dispatch exec`. This plugin matches that. Function-only binds (Universal copy/paste, zoom, some dropdowns) have no dispatcher string even in Super+K, so they cannot be replayed from a mouse button.
+
 ---
 
 # Omarchy 4 平滑滚动插件
@@ -158,3 +160,4 @@ omarchy plugin remove stillpilot.smooth-scroll
 - **看不到图标**：`omarchy restart shell`，并确认 `~/.config/omarchy/shell.json` 的 `bar.layout.right` 里有 `stillpilot.smooth-scroll`。
 - **鼠标卡住**：`systemctl --user stop stillpilot-smooth-scroll`，再跑 `install.sh`。
 - **没有平滑效果**：`systemctl --user status stillpilot-smooth-scroll`，`daemon.py list` 应列出你的鼠标。
+- **绑了快捷键没反应**：Omarchy 4 的 Hyprland 是 Lua，不能再用 `hyprctl dispatch exec`。本插件已按 Super+K 同样的 `hl.dsp.exec_cmd` / `hl.dsp.*` 派发。通用复制粘贴、缩放这类没有 dispatcher 字符串的绑定（Super+K 自己也调不起来）无法用鼠标重放。
