@@ -6,10 +6,10 @@ The bar icon (bottom-right by default) opens a panel where you can:
 
 - **Enable** — turn smoothing on or off
 - **Natural direction** — invert the wheel (wheel down moves content down)
-- **Damping** — how long the scroll coasts after you stop
-- **Acceleration** — extra distance when you flick the wheel quickly
+- **Inertia / Flick** — how long the scroll coasts, and how much extra a fast flick travels
+- **Buttons** — listen for a side button or wheel tilt, then pick a Hyprland shortcut from the same list as Super+K (or bind volume up / down / mute)
 
-A small userspace daemon grabs your physical mice, passes movement and buttons through unchanged, and interpolates each wheel detent into high-resolution `REL_WHEEL_HI_RES` events.
+A small userspace daemon grabs physical mice that report movement plus a wheel, passes motion and buttons through, interpolates each detent into high-resolution `REL_WHEEL_HI_RES` events, and runs any button bindings you set.
 
 Works on Wayland. No extra Python packages. You need write access to `/dev/uinput` (Omarchy usually grants this via the `input` group).
 
@@ -54,7 +54,13 @@ omarchy plugin remove stillpilot.smooth-scroll
 | Damping | 65 | Higher = longer coast, slower stop |
 | Acceleration | 35 | Higher = faster flicks travel farther |
 
-The same values live in `~/.config/omarchy/smooth-scroll.json`. The daemon reloads that file on change, so sliders apply immediately.
+### Button binds
+
+1. Click **Listen for a button**.
+2. Press a side button (or tilt the wheel). Left and right click are ignored.
+3. Search the Super+K shortcut list and pick one, or tap Volume up / down / Mute.
+
+Bindings are stored in `~/.config/omarchy/smooth-scroll.json` under `bindings`. The daemon reloads that file on change.
 
 IPC:
 
@@ -62,6 +68,7 @@ IPC:
 omarchy-shell stillpilot.smooth-scroll toggle   # open / close the panel
 python3 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/daemon.py get
 python3 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/daemon.py set damping 50
+python3 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/daemon.py shortcuts
 ```
 
 Menu: **Setup → Smooth Scroll** (added by `install.sh`).
@@ -71,8 +78,9 @@ Menu: **Setup → Smooth Scroll** (added by `install.sh`).
 1. Discover mice that report `REL_X` plus a wheel axis.
 2. Create a virtual pointer named `Omarchy Smooth Scroll`.
 3. Grab each physical mouse exclusively.
-4. Re-emit motion, buttons, and everything except wheel events.
+4. Re-emit motion, buttons, and everything except wheel events (unless a button is bound).
 5. Convert each detent into a decaying burst of high-res wheel events (~125 Hz).
+6. Bound extra buttons dispatch the chosen Hyprland shortcut or volume action.
 
 While the daemon is running it forces Hyprland `input.natural_scroll` off so direction is not inverted twice. Turning **Enable** off ungrabs the hardware and restores Hyprland's invert from the **Natural direction** toggle.
 
@@ -96,12 +104,12 @@ While the daemon is running it forces Hyprland `input.natural_scroll` off so dir
 
 # Omarchy 4 平滑滚动插件
 
-把机械滚轮变成带惯性的平滑滚动。底栏图标默认在右下角，点开可调：
+把机械滚轮变成带惯性的平滑滚动，并给侧键绑定快捷键。底栏图标默认在右下角，点开可调：
 
 - **Enable**：开关
 - **Natural direction**：滚动方向（向下滚，内容跟着向下）
-- **Damping**：阻尼 / 惯性，越大滑得越远、停得越慢
-- **Acceleration**：连滚加速
+- **Inertia / Flick**：惯性和连滚加速
+- **Buttons**：Listen 捕获侧键或滚轮左右拨，再从 Super+K 同一份快捷键列表里搜索选择；也可以绑音量加减/静音
 
 ## 安装
 
