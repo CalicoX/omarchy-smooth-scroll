@@ -20,9 +20,11 @@ omarchy plugin add https://github.com/CalicoX/omarchy-smooth-scroll.git --enable
 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/install.sh
 ```
 
+`omarchy plugin add` is a `git clone` of this repo's default branch (`main`), so you get whatever commit is newest on GitHub at that moment. It does **not** upgrade itself later.
+
 `--enable` asks where to put the widget; pick **right** for the bottom-right corner.
 
-`install.sh` writes a systemd **user** unit so the daemon starts with your graphical session.
+`install.sh` is required after add: it writes a systemd **user** unit so the daemon starts with your graphical session. `plugin add` alone does not install that unit.
 
 If `/dev/uinput` is not writable:
 
@@ -33,6 +35,8 @@ sudo gpasswd -a "$USER" input
 Then log out and back in.
 
 ### Update
+
+Already-installed copies stay on the commit you cloned. Pull the latest `main` with:
 
 ```bash
 omarchy plugin update stillpilot.smooth-scroll
@@ -118,9 +122,11 @@ omarchy plugin add https://github.com/CalicoX/omarchy-smooth-scroll.git --enable
 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/install.sh
 ```
 
+`omarchy plugin add` 会 clone 本仓库默认分支 `main` 上**当时最新的一次提交**。装完之后不会自动升级。
+
 `--enable` 时选 **right**，图标会出现在底栏右侧、电源按钮旁边。
 
-`install.sh` 会注册用户 systemd 服务，登录图形会话后自动启动守护进程。
+`install.sh` 必须再跑一次：它会注册用户 systemd 服务，登录后自动启动守护进程。只 `plugin add` 不会装这个服务。已经装过的用下面的「更新」。
 
 若无法写入 `/dev/uinput`：
 
