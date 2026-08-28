@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "natural": true,
+  "damping": 65,
+  "acceleration": 35
+}

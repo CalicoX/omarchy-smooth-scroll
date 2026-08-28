@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "stillpilot.smooth-scroll",
+  "name": "Smooth Scroll",
+  "version": "1.0.0",
+  "author": "stillpilot",
+  "license": "MIT",
+  "homepage": "https://github.com/CalicoX/omarchy-smooth-scroll",
+  "description": "Smooth mouse-wheel scrolling for Omarchy 4 / Hyprland, with direction, damping, and acceleration.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Smooth Scroll",
+    "description": "Mouse wheel smoothing, direction, damping, acceleration",
+    "category": "Input",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
