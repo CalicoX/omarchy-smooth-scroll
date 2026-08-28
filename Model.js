@@ -6,6 +6,7 @@ function defaults() {
     natural: true,
     damping: 65,
     acceleration: 35,
+    autoUpdate: true,
     bindings: {}
   }
 }
@@ -70,6 +71,7 @@ function parse(text) {
     if (raw.natural !== undefined) cfg.natural = !!raw.natural
     if (raw.damping !== undefined) cfg.damping = clampInt(raw.damping, 0, 100)
     if (raw.acceleration !== undefined) cfg.acceleration = clampInt(raw.acceleration, 0, 100)
+    if (raw.auto_update !== undefined) cfg.autoUpdate = !!raw.auto_update
     if (raw.bindings && typeof raw.bindings === "object") {
       var b = {}
       for (var k in raw.bindings) {

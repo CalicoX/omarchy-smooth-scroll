@@ -2,5 +2,7 @@
   "enabled": true,
   "natural": true,
   "damping": 65,
-  "acceleration": 35
+  "acceleration": 35,
+  "auto_update": true,
+  "bindings": {}
 }

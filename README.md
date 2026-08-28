@@ -20,7 +20,9 @@ omarchy plugin add https://github.com/CalicoX/omarchy-smooth-scroll.git --enable
 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/install.sh
 ```
 
-`omarchy plugin add` is a `git clone` of this repo's default branch (`main`), so you get whatever commit is newest on GitHub at that moment. It does **not** upgrade itself later.
+`omarchy plugin add` is a `git clone` of this repo's default branch (`main`), so a fresh install is the newest commit on GitHub at that moment.
+
+After that, the daemon **auto-updates** by default: it fast-forwards `main` about 45 seconds after start, then every 6 hours, and restarts itself. Turn this off with **Auto-update from GitHub** in the panel, or `"auto_update": false` in the config. Dirty local git changes are never overwritten.
 
 `--enable` asks where to put the widget; pick **right** for the bottom-right corner.
 
@@ -36,7 +38,7 @@ Then log out and back in.
 
 ### Update
 
-Already-installed copies stay on the commit you cloned. Pull the latest `main` with:
+Automatic by default. To pull immediately:
 
 ```bash
 omarchy plugin update stillpilot.smooth-scroll
@@ -122,11 +124,11 @@ omarchy plugin add https://github.com/CalicoX/omarchy-smooth-scroll.git --enable
 ~/.config/omarchy/plugins/stillpilot.smooth-scroll/install.sh
 ```
 
-`omarchy plugin add` 会 clone 本仓库默认分支 `main` 上**当时最新的一次提交**。装完之后不会自动升级。
+`omarchy plugin add` 会 clone 本仓库 `main` 上当时最新的提交。之后守护进程**默认自动升级**：启动约 45 秒检查一次，之后每 6 小时再查；有新提交就 fast-forward 并自行重启。面板里 **Auto-update from GitHub** 可关掉。本地有未提交改动时不会覆盖。
 
 `--enable` 时选 **right**，图标会出现在底栏右侧、电源按钮旁边。
 
-`install.sh` 必须再跑一次：它会注册用户 systemd 服务，登录后自动启动守护进程。只 `plugin add` 不会装这个服务。已经装过的用下面的「更新」。
+`install.sh` 必须再跑一次：它会注册用户 systemd 服务，登录后自动启动守护进程。只 `plugin add` 不会装这个服务。也可以随时手动：
 
 若无法写入 `/dev/uinput`：
 

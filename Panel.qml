@@ -16,6 +16,7 @@ Panel {
   property bool natural: true
   property int damping: 65
   property int acceleration: 35
+  property bool autoUpdate: true
   property var bindings: ({})
   property var bindingList: []
   property bool listening: false
@@ -35,7 +36,7 @@ Panel {
     { value: "volume-mute", label: "Mute", icon: "󰝟" }
   ]
   readonly property int bindCount: bindingList.length
-  readonly property var visibleSections: ["enable", "natural", "damping", "acceleration", "listen"]
+  readonly property var visibleSections: ["enable", "natural", "autoupdate", "damping", "acceleration", "listen"]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -46,6 +47,7 @@ Panel {
     root.natural = cfg.natural
     root.damping = cfg.damping
     root.acceleration = cfg.acceleration
+    root.autoUpdate = cfg.autoUpdate !== false
     root.bindings = cfg.bindings
     root.bindingList = Model.bindingList(cfg.bindings)
   }
@@ -62,6 +64,11 @@ Panel {
   function setNatural(value) {
     root.natural = value
     setKey("natural", value)
+  }
+
+  function setAutoUpdate(value) {
+    root.autoUpdate = value
+    setKey("auto_update", value)
   }
 
   function setDamping(value) {
@@ -173,6 +180,7 @@ Panel {
   function adjustCurrent(delta) {
     if (focusSection === "enable") setEnabled(!enabled)
     else if (focusSection === "natural") setNatural(!natural)
+    else if (focusSection === "autoupdate") setAutoUpdate(!autoUpdate)
     else if (focusSection === "damping") setDamping(damping + delta * 5)
     else if (focusSection === "acceleration") setAcceleration(acceleration + delta * 5)
     else if (focusSection === "listen") startListen()
@@ -252,6 +260,7 @@ Panel {
         if (root.focusSection === "listen") root.startListen()
         else if (root.focusSection === "enable") root.setEnabled(!root.enabled)
         else if (root.focusSection === "natural") root.setNatural(!root.natural)
+        else if (root.focusSection === "autoupdate") root.setAutoUpdate(!root.autoUpdate)
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -355,6 +364,19 @@ Panel {
               onClicked: root.setNatural(!root.natural)
               onHovered: function(on) {
                 if (on) { root.cursorActive = true; root.focusSection = "natural" }
+              }
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Auto-update from GitHub"
+              description: "Check main about 45s after start, then every 6 hours"
+              checked: root.autoUpdate
+              hasCursor: root.cursorActive && root.focusSection === "autoupdate"
+              foreground: root.bar.foreground
+              onClicked: root.setAutoUpdate(!root.autoUpdate)
+              onHovered: function(on) {
+                if (on) { root.cursorActive = true; root.focusSection = "autoupdate" }
               }
             }
 

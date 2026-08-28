@@ -17,6 +17,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -26,6 +27,9 @@ LOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "stillpilot-smoo
 LEARN_PATH = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "smooth-scroll.learn"
 VIRTUAL_NAME = "Omarchy Smooth Scroll"
 OMARCHY_BIN = "/usr/share/omarchy/bin"
+PLUGIN_DIR = Path(__file__).resolve().parent
+UPDATE_INTERVAL = 6 * 3600
+UPDATE_FIRST_DELAY = 45
 
 EVENT_FMT = "llHHi"
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
@@ -87,6 +91,7 @@ DEFAULTS = {
     "natural": True,
     "damping": 65,
     "acceleration": 35,
+    "auto_update": True,
     "bindings": {},
 }
 
@@ -119,6 +124,7 @@ def load_config():
     data["natural"] = bool(data.get("natural", True))
     data["damping"] = int(clamp(int(data.get("damping", 65)), 0, 100))
     data["acceleration"] = int(clamp(int(data.get("acceleration", 35)), 0, 100))
+    data["auto_update"] = bool(data.get("auto_update", True))
     data["bindings"] = normalize_bindings(data.get("bindings"))
     return data
 
@@ -148,11 +154,53 @@ def save_config(data):
     payload["natural"] = bool(payload["natural"])
     payload["damping"] = int(clamp(int(payload["damping"]), 0, 100))
     payload["acceleration"] = int(clamp(int(payload["acceleration"]), 0, 100))
+    payload["auto_update"] = bool(payload.get("auto_update", True))
     payload["bindings"] = normalize_bindings(payload.get("bindings"))
     tmp = CONFIG_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(CONFIG_PATH)
     return payload
+
+
+def git_cmd(*args, timeout=40):
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return subprocess.run(
+        ["git", "-C", str(PLUGIN_DIR), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+
+
+def try_auto_update():
+    if not load_config().get("auto_update", True):
+        return False
+    if not (PLUGIN_DIR / ".git").is_dir():
+        return False
+    try:
+        if git_cmd("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+            return False
+        if git_cmd("status", "--porcelain").stdout.strip():
+            return False
+        fetch = git_cmd("fetch", "--quiet", "origin", "HEAD")
+        if fetch.returncode != 0:
+            return False
+        local = git_cmd("rev-parse", "HEAD").stdout.strip()
+        remote = git_cmd("rev-parse", "FETCH_HEAD").stdout.strip()
+        if not remote or local == remote:
+            return False
+        if git_cmd("merge", "--ff-only", "FETCH_HEAD").returncode != 0:
+            return False
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def restart_daemon():
+    script = str(PLUGIN_DIR / "daemon.py")
+    os.execv(sys.executable, [sys.executable, script])
 
 
 def ensure_path():
@@ -403,6 +451,10 @@ class Engine:
         self.last_hypr_natural = None
         self.tilt_acc = 0
         self.swallowed_keys = set()
+        self._update_thread = None
+        self._update_ready = False
+        self._started_at = time.monotonic()
+        self._last_update_check = 0.0
 
     def log(self, msg):
         sys.stderr.write(f"smooth-scroll: {msg}\n")
@@ -546,6 +598,28 @@ class Engine:
                 except OSError:
                     pass
 
+    def kick_update(self):
+        if not self.smoother.cfg.get("auto_update", True):
+            return
+        if self._update_thread and self._update_thread.is_alive():
+            return
+
+        def worker():
+            if try_auto_update():
+                self._update_ready = True
+
+        self._update_thread = threading.Thread(target=worker, daemon=True)
+        self._update_thread.start()
+
+    def apply_update_if_ready(self):
+        if not self._update_ready:
+            return
+        self.log("updated from GitHub; restarting")
+        _spawn(["notify-send", "-a", "Smooth Scroll", "Smooth Scroll", "Updated from GitHub"])
+        _spawn([f"{OMARCHY_BIN}/omarchy-shell", "shell", "rescanPlugins"])
+        self.stop_grab()
+        restart_daemon()
+
     def loop(self):
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, "running", False))
@@ -557,6 +631,16 @@ class Engine:
                 self.start_grab()
             elif not want and self.active:
                 self.stop_grab()
+            now = time.monotonic()
+            if self.smoother.cfg.get("auto_update", True):
+                if self._last_update_check == 0:
+                    if now - self._started_at >= UPDATE_FIRST_DELAY:
+                        self._last_update_check = now
+                        self.kick_update()
+                elif now - self._last_update_check >= UPDATE_INTERVAL:
+                    self._last_update_check = now
+                    self.kick_update()
+            self.apply_update_if_ready()
             timeout = 0.008
             fds = [m.fd for m in self.mice if m.fd >= 0]
             if fds:
@@ -689,13 +773,13 @@ def cmd_learn(seconds="15"):
 
 def cmd_set(args):
     if len(args) < 2:
-        print("usage: daemon.py set <enabled|natural|damping|acceleration> <value>", file=sys.stderr)
+        print("usage: daemon.py set <enabled|natural|damping|acceleration|auto_update> <value>", file=sys.stderr)
         sys.exit(2)
     key, raw = args[0], args[1]
-    if key not in DEFAULTS:
+    if key not in DEFAULTS or key == "bindings":
         print(f"unknown key: {key}", file=sys.stderr)
         sys.exit(2)
-    if key in ("enabled", "natural"):
+    if key in ("enabled", "natural", "auto_update"):
         value = raw.lower() in ("1", "true", "yes", "on")
     else:
         value = int(raw)
