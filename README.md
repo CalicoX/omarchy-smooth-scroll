@@ -66,6 +66,8 @@ omarchy plugin remove stillpilot.smooth-scroll
 2. Press a side button (or tilt the wheel). Left and right click are ignored.
 3. Search the Super+K shortcut list and pick one, or tap Volume up / down / Mute.
 
+Volume binds play the desktop `audio-volume-change` tick at the new level (muted / 0% stays silent). Keyboard volume keys use the same helper.
+
 Bindings are stored in `~/.config/omarchy/smooth-scroll.json` under `bindings`. The daemon reloads that file on change.
 
 IPC:
@@ -117,7 +119,7 @@ While the daemon is running it forces Hyprland `input.natural_scroll` off so dir
 - **Enable**：开关
 - **Natural direction**：滚动方向（向下滚，内容跟着向下）
 - **Inertia / Flick**：惯性和连滚加速
-- **Buttons**：Listen 捕获侧键或滚轮左右拨，再从 Super+K 同一份快捷键列表里搜索选择；也可以绑音量加减/静音
+- **Buttons**：Listen 捕获侧键或滚轮左右拨，再从 Super+K 同一份快捷键列表里搜索选择；也可以绑音量加减/静音。调音量会在新音量下播一声系统提示音。
 
 ## 安装
 

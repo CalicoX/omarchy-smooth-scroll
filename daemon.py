@@ -95,11 +95,12 @@ DEFAULTS = {
     "bindings": {},
 }
 
+VOLUME_FEEDBACK = PLUGIN_DIR / "volume-feedback.sh"
 ACTIONS = {
     "keybindings": [f"{OMARCHY_BIN}/omarchy-menu-keybindings"],
-    "volume-up": [f"{OMARCHY_BIN}/omarchy-audio-output-volume", "raise"],
-    "volume-down": [f"{OMARCHY_BIN}/omarchy-audio-output-volume", "lower"],
-    "volume-mute": [f"{OMARCHY_BIN}/omarchy-audio-output-volume", "mute-toggle"],
+    "volume-up": [str(VOLUME_FEEDBACK), "raise"],
+    "volume-down": [str(VOLUME_FEEDBACK), "lower"],
+    "volume-mute": [str(VOLUME_FEEDBACK), "mute-toggle"],
     "play-pause": [f"{OMARCHY_BIN}/omarchy-shell", "media", "playPause"],
     "next-track": [f"{OMARCHY_BIN}/omarchy-shell", "media", "next"],
     "prev-track": [f"{OMARCHY_BIN}/omarchy-shell", "media", "previous"],
