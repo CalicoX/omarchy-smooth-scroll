@@ -83,10 +83,10 @@ Menu: **Setup → Smooth Scroll** (added by `install.sh`).
 
 ## How it works
 
-1. Discover mice that report `REL_X` plus a wheel axis.
-2. Create a virtual pointer named `Omarchy Smooth Scroll`.
-3. Grab each physical mouse exclusively.
-4. Re-emit motion, buttons, and everything except wheel events (unless a button is bound).
+1. Discover wheel mice via sysfs (never opening every `/dev/input/event*` on the pointer thread). If any mouse has extra buttons (side / back / forward), only those are used — keyboard-dongle and Bluetooth keyboard-mice stay out of the way.
+2. Create a virtual pointer named `Omarchy Smooth Scroll` once, and keep it for the whole session.
+3. Grab physical mice on a background thread. Device add/remove does not destroy the virtual pointer.
+4. Re-emit motion and buttons in bulk. Dropped `uinput` writes were a source of stutter; writes now block instead of skipping packets.
 5. Convert each detent into a decaying burst of high-res wheel events (~125 Hz).
 6. Bound extra buttons dispatch the chosen Hyprland shortcut or volume action.
 
@@ -103,6 +103,8 @@ While the daemon is running it forces Hyprland `input.natural_scroll` off so dir
 **Bar icon missing.** The widget must have a non-zero width. After updating, run `omarchy restart shell`. Confirm it is in the right section of `~/.config/omarchy/shell.json`.
 
 **Pointer frozen.** Stop the daemon: `systemctl --user stop stillpilot-smooth-scroll`. The kernel ungrabs on process exit. Restart with `install.sh`.
+
+**Pointer stutter / lag while moving.** The daemon used to reopen and re-grab every mouse about once a second (and tear down the virtual pointer whenever a Bluetooth device flickered). That blocks in the kernel and hitchs the cursor. Update to 1.2.4+, then `systemctl --user restart stillpilot-smooth-scroll`. Confirm `daemon.py list` shows only your real mouse, not a keyboard dongle.
 
 **No smoothing.** `systemctl --user status stillpilot-smooth-scroll`. `daemon.py list` should print your mice. If `/dev/uinput` is not writable, add the `input` group and re-login.
 
@@ -161,5 +163,6 @@ omarchy plugin remove stillpilot.smooth-scroll
 
 - **看不到图标**：`omarchy restart shell`，并确认 `~/.config/omarchy/shell.json` 的 `bar.layout.right` 里有 `stillpilot.smooth-scroll`。
 - **鼠标卡住**：`systemctl --user stop stillpilot-smooth-scroll`，再跑 `install.sh`。
+- **移动卡顿**：1.2.4 起不再每秒重抓鼠标、也不再因蓝牙设备闪断而销毁虚拟指针。更新后执行 `systemctl --user restart stillpilot-smooth-scroll`。
 - **没有平滑效果**：`systemctl --user status stillpilot-smooth-scroll`，`daemon.py list` 应列出你的鼠标。
 - **绑了快捷键没反应**：Omarchy 4 的 Hyprland 是 Lua，不能再用 `hyprctl dispatch exec`。本插件已按 Super+K 同样的 `hl.dsp.exec_cmd` / `hl.dsp.*` 派发。通用复制粘贴、缩放这类没有 dispatcher 字符串的绑定（Super+K 自己也调不起来）无法用鼠标重放。罗技鼠标休眠/切通道后会在约 1 秒内重新抓取。

@@ -39,6 +39,7 @@ Type=simple
 ExecStart=/usr/bin/python3 $ROOT/daemon.py
 Restart=on-failure
 RestartSec=1
+Nice=-5
 Environment=XDG_RUNTIME_DIR=%t
 
 [Install]

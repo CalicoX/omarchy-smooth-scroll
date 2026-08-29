@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import array
 import atexit
+import ctypes
 import fcntl
 import json
 import os
+import queue
 import select
 import signal
 import struct
@@ -46,9 +48,24 @@ BTN_SIDE, BTN_EXTRA, BTN_FORWARD, BTN_BACK, BTN_TASK = 0x113, 0x114, 0x115, 0x11
 INPUT_PROP_POINTER = 0
 
 WHEEL_CODES = {REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES}
+EXTRA_BUTTON_MASK = (
+    (1 << BTN_SIDE) | (1 << BTN_EXTRA) | (1 << BTN_FORWARD) | (1 << BTN_BACK) | (1 << BTN_TASK)
+)
 PASSTHROUGH_BUTTONS = [
     BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA, BTN_FORWARD, BTN_BACK, BTN_TASK,
 ]
+SKIP_NAME_PARTS = (
+    "keyboard",
+    "consumer control",
+    "system control",
+    "touchpad",
+    "link-km",
+    "avrcp",
+    "speaker",
+    "headphone",
+    "microphone",
+)
+PR_SET_TIMERSLACK = 29
 BTN_LABELS = {
     BTN_LEFT: "left",
     BTN_RIGHT: "right",
@@ -208,7 +225,7 @@ def try_auto_update():
             return False
         if git_cmd("merge", "--ff-only", "FETCH_HEAD").returncode != 0:
             return False
-        return True
+        return git_cmd("rev-parse", "HEAD").stdout.strip() != local
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -389,30 +406,64 @@ def evbit(fd, ev, length=64):
     return int.from_bytes(buf.tobytes(), "little")
 
 
+def parse_sysfs_bitmap(text):
+    mask = 0
+    for part in text.split():
+        mask = (mask << 64) | int(part, 16)
+    return mask
+
+
+def skip_device_name(name):
+    if not name or name == VIRTUAL_NAME:
+        return True
+    lowered = name.lower()
+    return any(part in lowered for part in SKIP_NAME_PARTS)
+
+
+def looks_like_wheel_mouse(name, rel_mask):
+    if skip_device_name(name):
+        return False
+    has_move = bool(rel_mask & (1 << REL_X))
+    has_wheel = bool(rel_mask & ((1 << REL_WHEEL) | (1 << REL_WHEEL_HI_RES)))
+    return has_move and has_wheel
+
+
+def sysfs_caps(event_path):
+    sysdev = Path("/sys/class/input") / Path(event_path).name / "device"
+    try:
+        name = (sysdev / "name").read_text(encoding="utf-8", errors="replace").strip()
+        rel = parse_sysfs_bitmap((sysdev / "capabilities" / "rel").read_text())
+        key = parse_sysfs_bitmap((sysdev / "capabilities" / "key").read_text())
+        return name, rel, key
+    except (OSError, ValueError):
+        return None, 0, 0
+
+
 def is_mouse_path(path):
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
+    name, rel, _key = sysfs_caps(path)
+    if name is None:
         return False
-    try:
-        name = device_name(fd)
-        if name == VIRTUAL_NAME:
-            return False
-        lowered = name.lower()
-        if any(s in lowered for s in ("keyboard", "consumer control", "system control", "touchpad")):
-            return False
-        rel = evbit(fd, EV_REL)
-        has_move = bool(rel & (1 << REL_X))
-        has_wheel = bool(rel & ((1 << REL_WHEEL) | (1 << REL_WHEEL_HI_RES)))
-        return has_move and has_wheel
-    except OSError:
-        return False
-    finally:
-        os.close(fd)
+    return looks_like_wheel_mouse(name, rel)
 
 
 def list_mice():
-    return [p for p in sorted(Path("/dev/input").glob("event*")) if is_mouse_path(str(p))]
+    """Wheel mice, preferring ones with extra buttons when any exist.
+
+    Keyboard dongles and Bluetooth keyboard-mice often expose a 3-button
+    pointer. Grabbing those together with a real mouse merges jitter and
+    reconnect storms into the cursor. Sysfs is used so the scan never
+    opens /dev/input/event* (those opens can block in RCU on BT/USB).
+    """
+    candidates = []
+    for path in sorted(Path("/dev/input").glob("event*")):
+        name, rel, key = sysfs_caps(path)
+        if name is None or not looks_like_wheel_mouse(name, rel):
+            continue
+        extra = bool(key & EXTRA_BUTTON_MASK)
+        candidates.append((path, extra))
+    primaries = [path for path, extra in candidates if extra]
+    chosen = primaries or [path for path, _extra in candidates]
+    return chosen
 
 
 def bits_set(mask):
@@ -441,33 +492,30 @@ def pack_event(etype, code, value):
 
 class UInput:
     def __init__(self, source_fds=None):
-        self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
-        key_mask = 0
-        rel_mask = 0
-        msc_mask = 1 << MSC_SCAN
-        for src in source_fds or []:
-            key_mask |= evbit(src, EV_KEY, 256)
-            rel_mask |= evbit(src, EV_REL, 16)
-            msc_mask |= evbit(src, EV_MSC, 8)
-        if not key_mask:
-            for code in PASSTHROUGH_BUTTONS:
-                key_mask |= 1 << code
-        rel_mask |= (
-            (1 << REL_X)
-            | (1 << REL_Y)
-            | (1 << REL_WHEEL)
-            | (1 << REL_HWHEEL)
-            | (1 << REL_WHEEL_HI_RES)
-            | (1 << REL_HWHEEL_HI_RES)
-        )
+        # Blocking writes: drop-on-EAGAIN is what made motion stutter.
+        self.fd = os.open("/dev/uinput", os.O_WRONLY)
         for ev in (EV_SYN, EV_KEY, EV_REL, EV_MSC):
             fcntl.ioctl(self.fd, UI_SET_EVBIT, ev)
-        for code in bits_set(key_mask):
+        for code in range(0, 256):
             fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
-        for code in bits_set(rel_mask):
+        for code in range(0x100, 0x130):
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
+        for src in source_fds or []:
+            try:
+                for code in bits_set(evbit(src, EV_KEY, 256)):
+                    fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
+            except OSError:
+                pass
+        for code in (
+            REL_X,
+            REL_Y,
+            REL_WHEEL,
+            REL_HWHEEL,
+            REL_WHEEL_HI_RES,
+            REL_HWHEEL_HI_RES,
+        ):
             fcntl.ioctl(self.fd, UI_SET_RELBIT, code)
-        for code in bits_set(msc_mask):
-            fcntl.ioctl(self.fd, UI_SET_MSCBIT, code)
+        fcntl.ioctl(self.fd, UI_SET_MSCBIT, MSC_SCAN)
         fcntl.ioctl(self.fd, UI_SET_PROPBIT, INPUT_PROP_POINTER)
         setup = struct.pack("HHHH80sI", 0x03, 0x0001, 0x0001, 1, VIRTUAL_NAME.encode().ljust(80, b"\x00"), 0)
         fcntl.ioctl(self.fd, UI_DEV_SETUP, setup)
@@ -475,7 +523,18 @@ class UInput:
         time.sleep(0.05)
 
     def write(self, etype, code, value):
-        os.write(self.fd, pack_event(etype, code, value))
+        self.write_bytes(pack_event(etype, code, value))
+
+    def write_bytes(self, data):
+        view = memoryview(data)
+        while view:
+            try:
+                n = os.write(self.fd, view)
+            except InterruptedError:
+                continue
+            if n <= 0:
+                break
+            view = view[n:]
 
     def syn(self):
         self.write(EV_SYN, SYN_REPORT, 0)
@@ -582,7 +641,11 @@ class Engine:
         self._update_ready = False
         self._started_at = time.monotonic()
         self._last_update_check = 0.0
-        self._last_device_sync = 0.0
+        self._add_q = queue.SimpleQueue()
+        self._drop_q = queue.SimpleQueue()
+        self._unwanted = frozenset()
+        self._watch_thread = None
+        self._last_names = None
 
     def log(self, msg):
         sys.stderr.write(f"smooth-scroll: {msg}\n")
@@ -600,32 +663,6 @@ class Engine:
             "eval",
             f"hl.config({{ input = {{ natural_scroll = {flag} }} }})",
         )
-
-    def start_grab(self):
-        if self.active:
-            return
-        paths = list_mice()
-        if not paths:
-            self.log("no wheel mice found")
-            return
-        grabbed = []
-        try:
-            for path in paths:
-                grabbed.append(GrabbedMouse(str(path)))
-            self.ui = UInput([mouse.fd for mouse in grabbed])
-        except OSError as exc:
-            for mouse in grabbed:
-                mouse.ungrab()
-            if self.ui:
-                self.ui.close()
-                self.ui = None
-            self.log(f"grab/uinput failed: {exc}")
-            return
-        self.mice = grabbed
-        self.active = True
-        self.set_hypr_natural(False)
-        names = ", ".join(m.name for m in self.mice)
-        self.log(f"active on {names}")
 
     def bindings(self):
         return self.smoother.cfg.get("bindings") or {}
@@ -678,36 +715,120 @@ class Engine:
             self.tilt_acc -= step
         return True
 
+    def _apply_timer_slack(self):
+        try:
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_TIMERSLACK, 1000, 0, 0, 0)
+        except OSError:
+            pass
+
+    def _watch_loop(self):
+        grabbed_paths = set()
+        fail_until = {}
+        while self.running:
+            while True:
+                try:
+                    mouse = self._drop_q.get_nowait()
+                except queue.Empty:
+                    break
+                grabbed_paths.discard(mouse.path)
+                fail_until[mouse.path] = time.monotonic() + 1.5
+                mouse.ungrab()
+            self.smoother.reload()
+            enabled = bool(self.smoother.cfg.get("enabled", True))
+            if enabled:
+                try:
+                    paths = [str(p) for p in list_mice()]
+                except OSError as exc:
+                    self.log(f"scan failed: {exc}")
+                    paths = []
+                wanted = set(paths)
+                self._unwanted = frozenset(grabbed_paths - wanted)
+                now = time.monotonic()
+                for path in paths:
+                    if path in grabbed_paths:
+                        continue
+                    if fail_until.get(path, 0) > now:
+                        continue
+                    try:
+                        mouse = GrabbedMouse(path)
+                    except OSError as exc:
+                        self.log(f"grab failed {path}: {exc}")
+                        fail_until[path] = now + 3.0
+                        continue
+                    grabbed_paths.add(path)
+                    self._add_q.put(mouse)
+            else:
+                self._unwanted = frozenset(grabbed_paths)
+            time.sleep(1.0)
+        while True:
+            try:
+                mouse = self._drop_q.get_nowait()
+            except queue.Empty:
+                break
+            mouse.ungrab()
+
+    def _collect_mice(self):
+        enabled = bool(self.smoother.cfg["enabled"])
+        unwanted = self._unwanted
+        if enabled:
+            self.set_hypr_natural(False)
+        else:
+            self.set_hypr_natural(bool(self.smoother.cfg["natural"]))
+            self.smoother.vy = self.smoother.vx = 0.0
+        while True:
+            try:
+                mouse = self._add_q.get_nowait()
+            except queue.Empty:
+                break
+            if enabled:
+                self.mice.append(mouse)
+            else:
+                self._drop_q.put(mouse)
+        keep = []
+        for mouse in self.mice:
+            if (not enabled) or mouse.dead or mouse.fd < 0 or mouse.path in unwanted:
+                self._drop_q.put(mouse)
+            else:
+                keep.append(mouse)
+        self.mice = keep
+        self.active = bool(self.mice) and enabled
+        names = tuple(m.name for m in self.mice)
+        if names != self._last_names:
+            prev = self._last_names
+            self._last_names = names
+            if names:
+                self.log(f"active on {', '.join(names)}")
+            elif prev:
+                self.log("idle")
+
     def stop_grab(self):
+        for mouse in self.mice:
+            self._drop_q.put(mouse)
+        self.mice = []
+        self.active = False
+        self.smoother.vy = self.smoother.vx = 0.0
+        self.set_hypr_natural(bool(self.smoother.cfg["natural"]))
+
+    def shutdown(self):
+        self.running = False
+        if self._watch_thread is not None and self._watch_thread.is_alive():
+            self._watch_thread.join(timeout=2.5)
         for mouse in self.mice:
             mouse.ungrab()
         self.mice = []
+        while True:
+            try:
+                self._add_q.get_nowait().ungrab()
+            except queue.Empty:
+                break
+        while True:
+            try:
+                self._drop_q.get_nowait().ungrab()
+            except queue.Empty:
+                break
         if self.ui:
             self.ui.close()
             self.ui = None
-        was_active = self.active
-        self.active = False
-        self.smoother.vy = self.smoother.vx = 0.0
-        if was_active:
-            self.set_hypr_natural(bool(self.smoother.cfg["natural"]))
-            self.log("idle")
-
-    def grabbed_paths(self):
-        return [m.path for m in self.mice if m.fd >= 0 and not m.dead]
-
-    def sync_devices(self, force=False):
-        want = bool(self.smoother.cfg["enabled"])
-        if not want:
-            if self.active:
-                self.stop_grab()
-            return
-        paths = [str(p) for p in list_mice()]
-        current = self.grabbed_paths()
-        if not force and self.active and paths == current:
-            return
-        if self.active:
-            self.stop_grab()
-        self.start_grab()
 
     def handle_device(self, mouse: GrabbedMouse):
         try:
@@ -720,8 +841,10 @@ class Engine:
         if not data:
             mouse.dead = True
             return
+        out = bytearray()
+        unpack = struct.unpack_from
         for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
-            _sec, _usec, etype, code, value = struct.unpack_from(EVENT_FMT, data, offset)
+            _sec, _usec, etype, code, value = unpack(EVENT_FMT, data, offset)
             if etype == EV_KEY and self.on_key(code, value):
                 continue
             if etype == EV_REL and code in WHEEL_CODES:
@@ -742,14 +865,15 @@ class Engine:
                 if hires_y or hires_x:
                     self.smoother.impulse(hires_y, hires_x, time.monotonic())
                 mouse.wheel = mouse.hires = mouse.hwheel = mouse.hhires = 0
-            if etype == EV_SYN and code == SYN_DROPPED:
+            elif etype == EV_SYN and code == SYN_DROPPED:
                 mouse.wheel = mouse.hires = mouse.hwheel = mouse.hhires = 0
                 continue
-            if self.ui:
-                try:
-                    os.write(self.ui.fd, struct.pack(EVENT_FMT, _sec, _usec, etype, code, value))
-                except OSError:
-                    pass
+            out += data[offset:offset + EVENT_SIZE]
+        if out and self.ui:
+            try:
+                self.ui.write_bytes(out)
+            except OSError:
+                mouse.dead = True
 
     def kick_update(self):
         if not self.smoother.cfg.get("auto_update", True):
@@ -770,23 +894,31 @@ class Engine:
         self.log("updated from GitHub; restarting")
         _spawn(["notify-send", "-a", "Smooth Scroll", "Smooth Scroll", "Updated from GitHub"])
         _spawn([f"{OMARCHY_BIN}/omarchy-shell", "shell", "rescanPlugins"])
-        self.stop_grab()
+        self.shutdown()
         restart_daemon()
 
     def loop(self):
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, "running", False))
+        self._apply_timer_slack()
+        try:
+            self.ui = UInput()
+        except OSError as exc:
+            self.log(f"uinput failed: {exc}")
+            return
+        self._watch_thread = threading.Thread(
+            target=self._watch_loop, daemon=True, name="smooth-scroll-devices"
+        )
+        self._watch_thread.start()
         last = time.monotonic()
+        last_reload = 0.0
         while self.running:
-            self.smoother.reload()
             now = time.monotonic()
-            if now - self._last_device_sync >= 1.0:
-                self._last_device_sync = now
+            if now - last_reload >= 0.2:
+                last_reload = now
+                self.smoother.reload()
                 expire_learn()
-                self.sync_devices()
-            elif any(m.dead or m.fd < 0 for m in self.mice):
-                self.sync_devices(force=True)
-            now = time.monotonic()
+            self._collect_mice()
             if self.smoother.cfg.get("auto_update", True):
                 if self._last_update_check == 0:
                     if now - self._started_at >= UPDATE_FIRST_DELAY:
@@ -802,7 +934,9 @@ class Engine:
                 try:
                     readable, _, errored = select.select(fds, [], fds, timeout)
                 except OSError:
-                    self.sync_devices(force=True)
+                    for mouse in self.mice:
+                        if mouse.fd < 0:
+                            mouse.dead = True
                     continue
                 dead = set(errored)
                 for mouse in self.mice:
@@ -816,14 +950,14 @@ class Engine:
             now = time.monotonic()
             dt = now - last
             last = now
-            if self.active:
+            if self.active and self.ui:
                 chunks = self.smoother.step(dt)
-                if chunks and self.ui:
+                if chunks:
                     for code, value in chunks:
                         if value:
                             self.ui.write(EV_REL, code, value)
                     self.ui.syn()
-        self.stop_grab()
+        self.shutdown()
 
 
 def acquire_lock():
@@ -976,11 +1110,8 @@ def cmd_set(args):
 
 def cmd_list():
     for path in list_mice():
-        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK)
-        try:
-            print(f"{path}  {device_name(fd)}")
-        finally:
-            os.close(fd)
+        name, _rel, _key = sysfs_caps(path)
+        print(f"{path}  {name}")
 
 
 def _find_named_device(name):
