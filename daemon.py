@@ -9,6 +9,7 @@ Config: ~/.config/omarchy/smooth-scroll.json
 from __future__ import annotations
 
 import array
+import atexit
 import fcntl
 import json
 import os
@@ -25,6 +26,7 @@ HOME = Path.home()
 CONFIG_PATH = Path(os.environ.get("OMARCHY_SMOOTH_SCROLL_CONFIG") or (HOME / ".config/omarchy/smooth-scroll.json"))
 LOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "stillpilot-smooth-scroll.lock"
 LEARN_PATH = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "smooth-scroll.learn"
+LEARN_MAX_AGE = 20
 VIRTUAL_NAME = "Omarchy Smooth Scroll"
 OMARCHY_BIN = "/usr/share/omarchy/bin"
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -111,6 +113,18 @@ SKIP_LEARN = {BTN_LEFT, BTN_RIGHT}
 
 def clamp(value, lo, hi):
     return max(lo, min(hi, value))
+
+
+def expire_learn(max_age=LEARN_MAX_AGE):
+    try:
+        age = time.time() - LEARN_PATH.stat().st_mtime
+    except OSError:
+        return
+    if age > max_age:
+        try:
+            LEARN_PATH.unlink()
+        except OSError:
+            pass
 
 
 def load_config():
@@ -487,6 +501,7 @@ class GrabbedMouse:
         self.hires = 0
         self.hwheel = 0
         self.hhires = 0
+        self.dead = False
 
     def ungrab(self):
         try:
@@ -567,6 +582,7 @@ class Engine:
         self._update_ready = False
         self._started_at = time.monotonic()
         self._last_update_check = 0.0
+        self._last_device_sync = 0.0
 
     def log(self, msg):
         sys.stderr.write(f"smooth-scroll: {msg}\n")
@@ -616,10 +632,14 @@ class Engine:
 
     def capture_learn(self, code, label):
         try:
+            st = LEARN_PATH.stat()
             raw = LEARN_PATH.read_text(encoding="utf-8").strip()
         except OSError:
             return False
         if raw != "wait":
+            return False
+        if time.time() - st.st_mtime > LEARN_MAX_AGE:
+            expire_learn(0)
             return False
         payload = json.dumps({"code": str(code), "label": label})
         LEARN_PATH.write_text(payload + "\n", encoding="utf-8")
@@ -672,12 +692,33 @@ class Engine:
             self.set_hypr_natural(bool(self.smoother.cfg["natural"]))
             self.log("idle")
 
+    def grabbed_paths(self):
+        return [m.path for m in self.mice if m.fd >= 0 and not m.dead]
+
+    def sync_devices(self, force=False):
+        want = bool(self.smoother.cfg["enabled"])
+        if not want:
+            if self.active:
+                self.stop_grab()
+            return
+        paths = [str(p) for p in list_mice()]
+        current = self.grabbed_paths()
+        if not force and self.active and paths == current:
+            return
+        if self.active:
+            self.stop_grab()
+        self.start_grab()
+
     def handle_device(self, mouse: GrabbedMouse):
         try:
             data = os.read(mouse.fd, EVENT_SIZE * 64)
         except BlockingIOError:
             return
         except OSError:
+            mouse.dead = True
+            return
+        if not data:
+            mouse.dead = True
             return
         for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
             _sec, _usec, etype, code, value = struct.unpack_from(EVENT_FMT, data, offset)
@@ -738,11 +779,13 @@ class Engine:
         last = time.monotonic()
         while self.running:
             self.smoother.reload()
-            want = bool(self.smoother.cfg["enabled"])
-            if want and not self.active:
-                self.start_grab()
-            elif not want and self.active:
-                self.stop_grab()
+            now = time.monotonic()
+            if now - self._last_device_sync >= 1.0:
+                self._last_device_sync = now
+                expire_learn()
+                self.sync_devices()
+            elif any(m.dead or m.fd < 0 for m in self.mice):
+                self.sync_devices(force=True)
             now = time.monotonic()
             if self.smoother.cfg.get("auto_update", True):
                 if self._last_update_check == 0:
@@ -756,8 +799,16 @@ class Engine:
             timeout = 0.008
             fds = [m.fd for m in self.mice if m.fd >= 0]
             if fds:
-                readable, _, _ = select.select(fds, [], [], timeout)
+                try:
+                    readable, _, errored = select.select(fds, [], fds, timeout)
+                except OSError:
+                    self.sync_devices(force=True)
+                    continue
+                dead = set(errored)
                 for mouse in self.mice:
+                    if mouse.fd in dead:
+                        mouse.dead = True
+                        continue
                     if mouse.fd in readable:
                         self.handle_device(mouse)
             else:
@@ -879,6 +930,16 @@ def cmd_fire(code):
 
 def cmd_learn(seconds="15"):
     seconds = float(seconds)
+
+    def cleanup(*_):
+        try:
+            LEARN_PATH.unlink()
+        except OSError:
+            pass
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(1))
     LEARN_PATH.write_text("wait\n", encoding="utf-8")
     deadline = time.monotonic() + seconds
     try:
@@ -894,10 +955,7 @@ def cmd_learn(seconds="15"):
         print("timeout", file=sys.stderr)
         sys.exit(1)
     finally:
-        try:
-            LEARN_PATH.unlink()
-        except OSError:
-            pass
+        cleanup()
 
 
 def cmd_set(args):
